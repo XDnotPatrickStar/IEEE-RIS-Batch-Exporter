@@ -498,37 +498,45 @@ const IEEE_API = (() => {
         if (!resp.ok) continue;
         const data = await resp.json();
 
-        // ★ 诊断：打印完整的 JSON keys
-        if (window.__ieee_debug_once !== true) {
-          window.__ieee_debug_once = true;
+        // ★ 诊断：打印一次
+        if (window.__ieee_debug_abs !== true) {
+          window.__ieee_debug_abs = true;
           console.log(`[IEEE API DEBUG] URL: ${url}`);
           console.log(`[IEEE API DEBUG] HTTP: ${resp.status}`);
-          console.log(`[IEEE API DEBUG] JSON keys:`, Object.keys(data).join(', '));
-          // 打印每个字段的长度和前80字符
-          for (const [k, v] of Object.entries(data)) {
-            if (typeof v === 'string') {
-              console.log(`[IEEE API DEBUG]   ${k}: len=${v.length}, preview="${v.slice(0, 80)}"`);
-            } else if (typeof v === 'object' && v !== null) {
-              console.log(`[IEEE API DEBUG]   ${k}: type=${Array.isArray(v)?'array':'object'}, keys=${Object.keys(v||{}).join(',')}`);
+          console.log(`[IEEE API DEBUG] data.abstract: len=${(data.abstract||'').length}, endsWith="${(data.abstract||'').slice(-50)}"`);
+          // 深入检查 sections.abstract
+          if (data.sections && typeof data.sections === 'object') {
+            console.log(`[IEEE API DEBUG] sections keys:`, Object.keys(data.sections).join(', '));
+            for (const [sk, sv] of Object.entries(data.sections)) {
+              if (typeof sv === 'string') {
+                console.log(`[IEEE API DEBUG]   sections.${sk}: len=${sv.length}, endsWith="${sv.slice(-50)}"`);
+              } else if (typeof sv === 'object' && sv !== null) {
+                console.log(`[IEEE API DEBUG]   sections.${sk}: type=${Array.isArray(sv)?'array('+sv.length+')':'object'}, keys=`, Object.keys(sv).join(','));
+              }
             }
           }
+          // 也检查 htmlAbstractLink
+          console.log(`[IEEE API DEBUG] htmlAbstractLink: ${data.htmlAbstractLink || 'N/A'}`);
         }
 
-        // 尝试所有可能的摘要字段
-        const abs = data.abstract || data.text || data.content
-                 || data.description || data.details?.abstract
-                 || data.article?.abstract || data.metadata?.abstract
-                 || data.document?.abstract || data.result?.abstract
-                 || null;
+        // ★ 策略1: data.abstract (已经是完整摘要)
+        const abs = data.abstract || '';
+        if (abs.length > 10) return abs;
 
-        if (abs && abs.length > 10) {
-          if (window.__ieee_debug_once) {
-            window.__ieee_debug_once = false;  // 只在找到时再打一次
+        // ★ 策略2: sections.abstract 下的文本
+        if (data.sections?.abstract) {
+          const sabs = data.sections.abstract;
+          if (typeof sabs === 'string' && sabs.length > 10) return sabs;
+          if (sabs?.text) return sabs.text;
+          if (sabs?.content) return sabs.content;
+          if (sabs?.body) return sabs.body;
+          // sections.abstract 本身可能就是摘要内容
+          const sabsStr = JSON.stringify(sabs);
+          if (sabsStr.length > 10) {
+            console.warn(`[IEEE API] sections.abstract 是复杂对象，raw:`, sabsStr.slice(0, 200));
           }
-          return abs;
-        } else if (abs) {
-          console.warn(`[IEEE API] 摘要过短 (${abs.length} 字符):`, abs);
         }
+
       } catch (e) {
         if (e.name === 'AbortError') throw e;
         console.warn(`[IEEE API] ${url} 请求失败:`, e.message);
