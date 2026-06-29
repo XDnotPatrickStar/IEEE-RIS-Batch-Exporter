@@ -482,30 +482,41 @@ const IEEE_API = (() => {
    * /rest/document/{articleNumber}/abstract 返回 JSON: { title, abstract, ... }
    */
   async function fetchFullAbstract(articleNumber, signal) {
-    const url = `${DOC_URL}${articleNumber}/abstract`;
-    try {
-      const resp = await fetch(url, {
-        method: 'GET',
-        headers: { 'Accept': 'application/json, text/plain, */*', 'Referer': window.location.href },
-        credentials: 'include',
-        signal
-      });
-      if (!resp.ok) return null;  // 404/403 等静默跳过
-      const data = await resp.json();
-      // 返回完整摘要文本（取最长的可选字段）
-      return data.abstract || data.text || data.content || null;
-    } catch (e) {
-      if (e.name === 'AbortError') throw e;
-      return null;  // 网络错误，静默跳过
+    // 尝试多个 URL 模式
+    const urls = [
+      `${DOC_URL}${articleNumber}/abstract`,
+      `${DOC_URL}${articleNumber}`,
+    ];
+
+    for (const url of urls) {
+      try {
+        const resp = await fetch(url, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json, text/plain, */*', 'Referer': window.location.href },
+          credentials: 'include',
+          signal
+        });
+        if (!resp.ok) continue;
+        const data = await resp.json();
+        // 尝试所有可能的摘要字段
+        const abs = data.abstract || data.text || data.content || data.description || data.details?.abstract || null;
+        if (abs && abs.length > 10) {
+          return abs;
+        }
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+      }
     }
+    return null;
   }
 
   /**
    * 批量获取完整摘要，用文档 API 的完整摘要替换搜索 API 的截断摘要
+   * ★ 不再有阈值判断——始终尝试拉取完整摘要
    * @param {Array} records - 搜索 API 收集的元数据记录
    * @param {Object} options
    * @param {number} options.delayMs - 请求间隔
-   * @param {number} options.batchSize - 并发数（1-5，太大容易限流）
+   * @param {number} options.batchSize - 并发数（1-5）
    * @param {Function} options.onProgress - 进度回调 ({ enriched, total, current })
    * @param {AbortSignal} options.signal
    * @returns {Promise<{records: Array, stats: Object}>}
@@ -513,21 +524,25 @@ const IEEE_API = (() => {
   async function enrichWithFullAbstracts(records, options = {}) {
     const {
       delayMs = 250,
-      batchSize = 3,   // 并发 3 个请求
+      batchSize = 3,
       onProgress,
       signal
     } = options;
 
-    if (!records || records.length === 0) return { records, stats: { enriched: 0, total: 0, failed: 0 } };
+    if (!records || records.length === 0) return { records, stats: { enriched: 0, total: 0, failed: 0, skipped: 0 } };
 
     const total = records.length;
     let enriched = 0;
     let failed = 0;
     let skipped = 0;
 
-    console.log(`[IEEE API] 开始获取 ${total} 篇文章的完整摘要 (并发=${batchSize}, 间隔=${delayMs}ms)...`);
+    console.log(`[IEEE API] 开始获取 ${total} 篇文章的完整摘要...`);
 
-    // 处理多个并发批次
+    // ★ 输出第一个样例，用于诊断
+    const sample = records[0];
+    const sampleAbs = (sample.abstract || sample.abstractText || '');
+    console.log(`[IEEE API] 样例 #${sample.articleNumber}: 搜索API摘要长度=${sampleAbs.length}, 末尾=${sampleAbs.slice(-40)}`);
+
     for (let i = 0; i < total; i += batchSize) {
       if (signal?.aborted) throw new DOMException('用户取消', 'AbortError');
 
@@ -536,19 +551,22 @@ const IEEE_API = (() => {
         const an = record.articleNumber;
         if (!an) { skipped++; return; }
 
-        // 先检查搜索 API 的摘要是否已完整（超过 500 字符通常完整）
         const currentAbstract = record.abstract || record.abstractText || '';
-        if (currentAbstract.length > 500) {
-          // 已经很完整了，跳过
-          return;
-        }
 
+        // ★ 无条件请求完整摘要
         const fullAbs = await fetchFullAbstract(an, signal);
-        if (fullAbs && fullAbs.length > currentAbstract.length) {
+
+        if (fullAbs && fullAbs.length > currentAbstract.length * 1.1) {
+          // 新摘要至少比旧的长 10% 才替换
+          if (enriched < 3) {
+            console.log(`[IEEE API] #${an}: ${currentAbstract.length} → ${fullAbs.length} 字符 (+${fullAbs.length - currentAbstract.length})`);
+          }
+          record.abstract = fullAbs;
+          enriched++;
+        } else if (fullAbs && fullAbs.length > currentAbstract.length) {
           record.abstract = fullAbs;
           enriched++;
         } else if (fullAbs) {
-          // API 返回了但更短，保留原来的
           failed++;
         } else {
           failed++;
@@ -566,12 +584,12 @@ const IEEE_API = (() => {
       }
     }
 
-    console.log(`[IEEE API] 完整摘要获取完成: ${enriched} 篇已增强, ${failed} 篇无变化, ${skipped} 篇跳过`);
-    return {
-      records,
-      stats: { enriched, total, failed, skipped }
-    };
+    console.log(`[IEEE API] 完整摘要完成: ${enriched} 增强, ${failed} 无变化, ${skipped} 跳过`);
+    return { records, stats: { enriched, total, failed, skipped } };
   }
+
+  // ──────────────────────────────────────────────────────────
+  // DOM 备用
   // ──────────────────────────────────────────────────────────
 
   function extractArticleNumbersFromDOM() {
