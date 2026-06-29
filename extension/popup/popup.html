@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=420">
+  <title>IEEE RIS Batch Exporter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+
+    <!-- 头部 -->
+    <header class="header">
+      <h1 class="title">📚 IEEE RIS 批量导出</h1>
+      <p class="subtitle">一键导出全部搜索结果的 RIS 引文（含摘要）</p>
+    </header>
+
+    <!-- 搜索信息区 -->
+    <section class="section" id="searchInfo">
+      <div class="info-row">
+        <span class="label">查询：</span>
+        <span class="value query-text" id="queryText">--</span>
+      </div>
+      <div class="info-row">
+        <span class="label">总数：</span>
+        <span class="value" id="totalRecords">--</span>
+      </div>
+    </section>
+
+    <!-- 进度区 -->
+    <section class="section" id="progressSection" style="display:none;">
+      <div class="progress-bar-container">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+      <div class="progress-stats">
+        <div class="stat-row">
+          <span class="stat-label">阶段：</span>
+          <span class="stat-value" id="phaseLabel">--</span>
+        </div>
+        <div class="stat-row" id="collectStats" style="display:none;">
+          <span class="stat-label">收集：</span>
+          <span class="stat-value" id="collectCount">0 / 0</span>
+        </div>
+        <div class="stat-row" id="downloadStats" style="display:none;">
+          <span class="stat-label">下载：</span>
+          <span class="stat-value" id="downloadCount">0 / 0</span>
+        </div>
+      </div>
+      <p class="status-message" id="statusMessage"></p>
+    </section>
+
+    <!-- 完成区 -->
+    <section class="section complete-section" id="completeSection" style="display:none;">
+      <div class="complete-icon">✅</div>
+      <h3 class="complete-title">导出完成！</h3>
+      <div class="complete-info">
+        <div class="info-row">
+          <span class="label">文件：</span>
+          <span class="value" id="completeFilename">—</span>
+        </div>
+        <div class="info-row">
+          <span class="label">记录数：</span>
+          <span class="value" id="completeRecords">—</span>
+        </div>
+      </div>
+      <div class="complete-actions">
+        <button class="btn btn-secondary" id="btnOpenFolder">
+          📂 打开所在文件夹
+        </button>
+        <button class="btn btn-outline" id="btnNewExport">
+          🔄 重新导出
+        </button>
+      </div>
+    </section>
+
+    <!-- 非搜索页提示 -->
+    <section class="section" id="notSearchPage" style="display:none;">
+      <div class="warning-box">
+        <p>⚠️ 无法连接到 IEEE 搜索结果页。</p>
+        <p class="hint">
+          请跳转到 <strong>ieeexplore.ieee.org</strong> 并完成搜索。<br>
+          <span class="hint-em">如果已经在搜索结果页，请刷新页面后重试。</span>
+        </p>
+      </div>
+    </section>
+
+    <!-- 设置区 -->
+    <section class="section settings" id="settingsSection">
+      <h3 class="section-title">⚙️ 导出设置</h3>
+
+      <div class="setting-row">
+        <label for="citationsFormat">内容：</label>
+        <select id="citationsFormat">
+          <option value="citation-and-abstract">引文 + 摘要（推荐）</option>
+          <option value="citation-only">仅引文</option>
+        </select>
+      </div>
+
+      <div class="setting-row">
+        <label for="batchSize">批量大小：</label>
+        <select id="batchSize">
+          <option value="25">25 篇/批（慢但稳定）</option>
+          <option value="50" selected>50 篇/批（推荐）</option>
+          <option value="100">100 篇/批（快速）</option>
+        </select>
+      </div>
+
+      <div class="setting-row">
+        <label for="delayMs">批次间隔：</label>
+        <select id="delayMs">
+          <option value="300">300ms（快速）</option>
+          <option value="500" selected>500ms（推荐）</option>
+          <option value="1000">1000ms（保守）</option>
+          <option value="2000">2000ms（最安全）</option>
+        </select>
+      </div>
+
+      <div class="setting-row setting-checkbox">
+        <label class="checkbox-label" for="saveAs">
+          <input type="checkbox" id="saveAs" checked>
+          <span>每次导出前询问保存位置</span>
+        </label>
+        <span class="checkbox-hint">关闭则自动保存到下载目录</span>
+      </div>
+    </section>
+
+    <!-- 按钮区 -->
+    <section class="section actions">
+      <button class="btn btn-primary" id="btnStart" disabled>
+        🚀 开始导出全部
+      </button>
+      <button class="btn btn-danger" id="btnCancel" style="display:none;">
+        ✕ 取消导出
+      </button>
+    </section>
+
+    <section class="section actions">
+      <button class="btn btn-small btn-ghost" id="btnDiagnostics">
+        🔍 诊断连接
+      </button>
+    </section>
+
+    <!-- 诊断结果 -->
+    <section class="section" id="diagnosticsSection" style="display:none;">
+      <h3 class="section-title">诊断结果</h3>
+      <div id="diagnosticsContent" class="diag-content"></div>
+    </section>
+
+    <!-- 底部 -->
+    <footer class="footer">
+      <p>提示：请先在 IEEE Xplore 中登录你的 IEEE 账号（个人免费账号即可）</p>
+    </footer>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

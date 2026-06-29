@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "IEEE RIS Batch Exporter",
+  "version": "1.0.0",
+  "description": "一键批量导出 IEEE Xplore 搜索结果的全部 RIS 引文（含摘要），支持1000+篇文献。",
+  "author": "IEEE RIS Export Tool",
+  "homepage_url": "https://github.com/ieee-ris-exporter",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "downloads",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://ieeexplore.ieee.org/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://ieeexplore.ieee.org/search/*"
+      ],
+      "js": [
+        "utils/ieee-api.js",
+        "utils/ris-merger.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "IEEE RIS Batch Exporter",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}
