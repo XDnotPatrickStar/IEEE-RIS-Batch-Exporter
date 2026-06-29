@@ -478,11 +478,10 @@ const IEEE_API = (() => {
   }
 
   /**
-   * 从文章详情 API 获取单篇文章的完整摘要
-   * /rest/document/{articleNumber}/abstract 返回 JSON: { title, abstract, ... }
+   * 从文章详情 API 获取完整摘要
+   * 尝试多个端点 + 详细诊断日志
    */
   async function fetchFullAbstract(articleNumber, signal) {
-    // 尝试多个 URL 模式
     const urls = [
       `${DOC_URL}${articleNumber}/abstract`,
       `${DOC_URL}${articleNumber}`,
@@ -498,13 +497,45 @@ const IEEE_API = (() => {
         });
         if (!resp.ok) continue;
         const data = await resp.json();
+
+        // ★ 诊断：打印完整的 JSON keys
+        if (window.__ieee_debug_once !== true) {
+          window.__ieee_debug_once = true;
+          console.log(`[IEEE API DEBUG] URL: ${url}`);
+          console.log(`[IEEE API DEBUG] HTTP: ${resp.status}`);
+          console.log(`[IEEE API DEBUG] JSON keys:`, Object.keys(data).join(', '));
+          // 打印每个字段的长度和前80字符
+          for (const [k, v] of Object.entries(data)) {
+            if (typeof v === 'string') {
+              console.log(`[IEEE API DEBUG]   ${k}: len=${v.length}, preview="${v.slice(0, 80)}"`);
+            } else if (typeof v === 'object' && v !== null) {
+              console.log(`[IEEE API DEBUG]   ${k}: type=${Array.isArray(v)?'array':'object'}, keys=${Object.keys(v||{}).join(',')}`);
+            }
+          }
+        }
+
         // 尝试所有可能的摘要字段
-        const abs = data.abstract || data.text || data.content || data.description || data.details?.abstract || null;
+        const abs = data.abstract || data.text || data.content
+                 || data.description || data.details?.abstract
+                 || data.article?.abstract || data.metadata?.abstract
+                 || data.document?.abstract || data.result?.abstract
+                 || null;
+
         if (abs && abs.length > 10) {
+          if (window.__ieee_debug_once) {
+            window.__ieee_debug_once = false;  // 只在找到时再打一次
+          }
           return abs;
+        } else if (abs) {
+          console.warn(`[IEEE API] 摘要过短 (${abs.length} 字符):`, abs);
         }
       } catch (e) {
         if (e.name === 'AbortError') throw e;
+        console.warn(`[IEEE API] ${url} 请求失败:`, e.message);
+      }
+    }
+    return null;
+  }
       }
     }
     return null;
