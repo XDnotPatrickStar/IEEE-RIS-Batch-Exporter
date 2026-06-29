@@ -1,23 +1,20 @@
 /**
- * IEEE RIS Batch Exporter — Content Script v2
+ * IEEE RIS Batch Exporter — Content Script v3
  *
  * 注入到 IEEE Xplore 搜索结果页，负责全部 IEEE API 交互。
  *
- * 工作流程：
- * 1. 从页面 URL 提取 queryText
- * 2. 调用 /rest/search 分页收集全部文献的完整元数据
- * 3. 下载阶段：先试所有下载端点 → 都不行则用元数据自建 RIS
- * 4. 合并去重后发送给 background 保存
+ * ★ v3 架构变更：进度直接写入 chrome.storage.local，不经过 background
+ *   原因：Manifest V3 Service Worker 会在30秒后休眠，port全部断开
  */
 
 (function() {
   'use strict';
 
   let abortController = null;
-  let isRunning = false;  // ★ 防重入守卫
+  let isRunning = false;
 
   // ================================================================
-  // 消息监听
+  // 消息监听（只处理 popup 发来的命令 + 最终保存）
   // ================================================================
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -43,10 +40,8 @@
             sendResponse({ status: 'cancelled' });
             break;
           case 'runDiagnostics':
-            try {
-              const r = await IEEE_API.runDiagnostics();
-              sendResponse(r);
-            } catch(e) { sendResponse({ error: e.message }); }
+            try { const r = await IEEE_API.runDiagnostics(); sendResponse(r); }
+            catch(e) { sendResponse({ error: e.message }); }
             break;
           default:
             sendResponse({ error: 'Unknown: ' + message.action });
@@ -84,6 +79,22 @@
   }
 
   // ================================================================
+  // ★ 进度写入 storage（绕过 background，MV3 兼容）
+  // ================================================================
+
+  function updateStorageState(partial) {
+    chrome.storage.local.get(['taskState'], (result) => {
+      const current = result.taskState || {};
+      Object.assign(current, partial);
+      chrome.storage.local.set({ taskState: current }).catch(() => {});
+    });
+  }
+
+  function setErrorAndStop(errorMsg) {
+    updateStorageState({ status: 'error', error: errorMsg });
+  }
+
+  // ================================================================
   // 完整导出流程
   // ================================================================
 
@@ -93,10 +104,9 @@
       batchSize = 50, delayMs = 500,
       citationsFormat = 'citation-and-abstract',
       saveAs = true,
-      fullAbstracts = true   // ★ 新增：是否获取完整摘要
+      fullAbstracts = true
     } = options;
 
-    // ★ 标记运行中，防止重入
     isRunning = true;
 
     let queryText = optQuery;
@@ -107,7 +117,8 @@
       Object.assign(qp, info.queryParams);
     }
     if (!queryText) {
-      sendToBackground({ action: 'collectionError', error: '未检测到搜索查询。' });
+      setErrorAndStop('未检测到搜索查询。');
+      isRunning = false;
       return;
     }
 
@@ -115,41 +126,51 @@
     const signal = abortController.signal;
 
     try {
-      // ===== 阶段 1：收集完整元数据（不只是 ID） =====
-      sendToBackground({ action: 'collectionProgress', phase: 'collecting', collected: 0, total: 0, page: 0 });
+      // ===== 阶段 1：收集元数据 =====
+      updateStorageState({
+        status: 'collecting',
+        startTime: Date.now(),
+        queryText: queryText,
+        progress: { phase: 'collecting', collected: 0, total: 0, page: 0 }
+      });
 
-      let metadataRecords = await IEEE_API.collectAllMetadata(
+      const metadataRecords = await IEEE_API.collectAllMetadata(
         { queryText, rowsPerPage, queryParams: qp },
         (progress) => {
-          sendToBackground({
-            action: 'collectionProgress', phase: 'collecting',
-            collected: progress.collected, total: progress.total,
-            page: progress.page, totalPages: progress.totalPages
+          updateStorageState({
+            status: 'collecting',
+            progress: {
+              phase: 'collecting',
+              collected: progress.collected,
+              total: progress.total,
+              page: progress.page,
+              totalPages: progress.totalPages
+            }
           });
         },
         signal
       );
 
-      if (signal.aborted) return;
+      if (signal.aborted) { isRunning = false; return; }
       if (metadataRecords.length === 0) {
-        sendToBackground({ action: 'collectionError', error: '未找到任何文献。' });
+        setErrorAndStop('未找到任何文献。');
+        isRunning = false;
         return;
       }
 
-      const articleNumbers = metadataRecords
-        .map(r => String(r.articleNumber))
-        .filter(Boolean);
+      const articleNumbers = metadataRecords.map(r => String(r.articleNumber)).filter(Boolean);
 
-      sendToBackground({
-        action: 'collectionComplete',
-        articleNumbers, totalRecords: articleNumbers.length, queryText
-      });
-
-      // ===== 阶段 2：获取完整摘要（可选但推荐） =====
+      // ===== 阶段 2：完整摘要 =====
       if (fullAbstracts && citationsFormat === 'citation-and-abstract') {
-        sendToBackground({
-          action: 'downloadProgress', phase: 'abstracts',
-          downloaded: 0, total: articleNumbers.length, batch: 0, totalBatches: 0
+        updateStorageState({
+          status: 'abstracts',
+          progress: {
+            phase: 'abstracts',
+            downloaded: 0,   // 已处理篇数
+            total: articleNumbers.length,
+            enriched: 0,      // 成功补全数
+            failed: 0         // 失败数
+          }
         });
 
         const enrichResult = await IEEE_API.enrichWithFullAbstracts(
@@ -157,59 +178,71 @@
             delayMs: Math.max(delayMs, 800),
             batchSize: 2,
             onProgress: (prog) => {
-              sendToBackground({
-                action: 'downloadProgress', phase: 'abstracts',
-                downloaded: prog.current,   // ★ 已处理篇数（不是成功数）
-                total: prog.total,
-                enriched: prog.enriched,    // ★ 额外：成功数
-                failed: prog.failed         // ★ 额外：失败数
+              updateStorageState({
+                status: 'abstracts',
+                progress: {
+                  phase: 'abstracts',
+                  downloaded: prog.current,
+                  total: prog.total,
+                  enriched: prog.enriched,
+                  failed: prog.failed
+                }
               });
             },
             signal
           }
         );
 
-        if (signal.aborted) return;
+        if (signal.aborted) { isRunning = false; return; }
         console.log(`[Content] 摘要增强: ${enrichResult.stats.enriched} 篇已补全, ${enrichResult.stats.failed} 篇无变化`);
       }
 
-      // ===== 阶段 3：下载 RIS（端点优先 → 元数据构建兜底） =====
-      const totalBatches = Math.ceil(articleNumbers.length / batchSize);
-      sendToBackground({
-        action: 'downloadProgress', phase: 'downloading',
-        downloaded: 0, total: articleNumbers.length, batch: 0, totalBatches
+      // ===== 阶段 3：构建 RIS =====
+      updateStorageState({
+        status: 'downloading',
+        progress: {
+          phase: 'downloading',
+          downloaded: 0,
+          total: articleNumbers.length,
+          batch: 0,
+          totalBatches: Math.ceil(articleNumbers.length / batchSize)
+        }
       });
 
-      // ★ 把已增强的元数据传给 downloadAllRIS 作为 fallback
       const { risText, stats } = await IEEE_API.downloadAllRIS(
         articleNumbers, {
           batchSize, delayMs,
           risFormat: 'download-ris', citationsFormat,
           onProgress: (prog) => {
-            sendToBackground({
-              action: 'downloadProgress', phase: 'downloading',
-              downloaded: prog.downloaded, total: prog.total,
-              batch: prog.batch, totalBatches: prog.totalBatches
+            updateStorageState({
+              status: 'downloading',
+              progress: {
+                phase: 'downloading',
+                downloaded: prog.downloaded,
+                total: prog.total,
+                batch: prog.batch,
+                totalBatches: prog.totalBatches
+              }
             });
           },
           signal,
-          metadataRecords  // ★ 此时 abstract 字段已是完整摘要
+          metadataRecords
         }
       );
 
-      if (signal.aborted) return;
+      if (signal.aborted) { isRunning = false; return; }
 
       if (stats.totalDownloaded === 0) {
-        sendToBackground({
-          action: 'downloadError',
-          error: '所有批次均失败。下载端点已 404，元数据构建也未成功。\n请尝试刷新 IEEE 页面后重试。'
-        });
+        setErrorAndStop('所有批次均失败。');
+        isRunning = false;
         return;
       }
 
-      // ===== 阶段 3：合并去重 =====
-      sendToBackground({ action: 'downloadProgress', phase: 'merging',
-        downloaded: stats.totalDownloaded, total: stats.totalRequested });
+      // ===== 阶段 4：合并去重 =====
+      updateStorageState({
+        status: 'merging',
+        progress: { phase: 'merging', downloaded: stats.totalDownloaded, total: stats.totalRequested }
+      });
 
       const mergeResult = RIS_MERGER.mergeFast([risText], { dedupField: 'AN', keepFirst: true });
 
@@ -218,7 +251,7 @@
         format: 'RIS', citationsFormat
       });
 
-      // ===== 阶段 4：保存 =====
+      // ===== 阶段 5：保存文件（唯一需要 background 的步骤）=====
       const saveResult = await sendToBackgroundAsync({
         action: 'saveRISFile', risText: finalRIS,
         meta: { queryText, totalRecords: mergeResult.stats.totalUnique,
@@ -226,37 +259,34 @@
           totalDuplicates: mergeResult.stats.totalDuplicates, saveAs }
       });
 
-      if (signal.aborted) return;
+      if (signal.aborted) { isRunning = false; return; }
 
       if (!saveResult?.success) {
-        sendToBackground({ action: 'downloadError', error: saveResult?.error || '文件保存失败' });
+        setErrorAndStop(saveResult?.error || '文件保存失败');
+        isRunning = false;
         return;
       }
 
       // 完成
-      sendToBackground({
-        action: 'downloadComplete',
-        stats: {
-          totalCollected: articleNumbers.length,
-          totalDownloaded: stats.totalDownloaded,
-          totalUnique: mergeResult.stats.totalUnique,
-          totalDuplicates: mergeResult.stats.totalDuplicates,
-          batchesCompleted: stats.batchesCompleted,
-          batchesTotal: stats.batchesTotal,
-          fallbackUsed: !stats.usedEndpoint  // 标记是否用了 fallback 方案
-        }
+      updateStorageState({
+        status: 'complete',
+        progress: { phase: 'complete', total: mergeResult.stats.totalUnique },
+        lastFilename: saveResult.filename,
+        lastDownloadId: saveResult.downloadId
       });
+
+      console.log(`[Content] 导出完成: ${mergeResult.stats.totalUnique} 篇`);
 
     } catch (err) {
       if (err.name === 'AbortError' || signal.aborted) {
-        sendToBackground({ action: 'collectionCancelled' });
-        return;
+        updateStorageState({ status: 'cancelled' });
+      } else {
+        console.error('[Content] 导出错误:', err);
+        setErrorAndStop(err.message || String(err));
       }
-      console.error('[Content] 导出错误:', err);
-      sendToBackground({ action: 'downloadError', error: err.message || String(err) });
     } finally {
       abortController = null;
-      isRunning = false;  // ★ 重置守卫
+      isRunning = false;
     }
   }
 
@@ -265,7 +295,7 @@
   }
 
   function sendToBackground(msg) {
-    chrome.runtime.sendMessage(msg).catch(e => console.debug('[Content] sendMessage fail:', e.message));
+    chrome.runtime.sendMessage(msg).catch(() => {});
   }
 
   function sendToBackgroundAsync(msg) {
@@ -276,10 +306,6 @@
     });
   }
 
-  // ================================================================
-  // 初始化
-  // ================================================================
-
   chrome.runtime.sendMessage({ action: 'contentScriptLoaded', url: window.location.href }).catch(() => {});
-  console.log('[IEEE RIS Exporter v2] Content script 已加载');
+  console.log('[IEEE RIS Exporter v3] Content script 已加载 (storage直写模式)');
 })();

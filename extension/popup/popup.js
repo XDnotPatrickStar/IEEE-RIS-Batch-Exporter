@@ -1,57 +1,34 @@
 /**
- * IEEE RIS Batch Exporter — Popup UI 逻辑
+ * IEEE RIS Batch Exporter — Popup UI v3
  *
- * 弹出窗口：状态显示、进度条、设置管理、用户交互
+ * ★ 进度直接从 chrome.storage.local 读取（content script 直写，不经过 background）
+ * ★ Port 仅用于向 background 发送命令（start/cancel/openFolder）
  */
 
 (function() {
   'use strict';
 
   const $ = (sel) => document.querySelector(sel);
-
   const els = {
-    queryText: $('#queryText'),
-    totalRecords: $('#totalRecords'),
-    searchInfo: $('#searchInfo'),
-    notSearchPage: $('#notSearchPage'),
-    notSearchHint: $('#notSearchHint'),
-
-    progressSection: $('#progressSection'),
-    progressBar: $('#progressBar'),
-    phaseLabel: $('#phaseLabel'),
-    collectStats: $('#collectStats'),
-    collectCount: $('#collectCount'),
-    downloadStats: $('#downloadStats'),
-    downloadCount: $('#downloadCount'),
-    statusMessage: $('#statusMessage'),
-
-    completeSection: $('#completeSection'),
-    completeFilename: $('#completeFilename'),
+    queryText: $('#queryText'), totalRecords: $('#totalRecords'),
+    searchInfo: $('#searchInfo'), notSearchPage: $('#notSearchPage'),
+    progressSection: $('#progressSection'), progressBar: $('#progressBar'),
+    phaseLabel: $('#phaseLabel'), collectStats: $('#collectStats'),
+    collectCount: $('#collectCount'), downloadStats: $('#downloadStats'),
+    downloadCount: $('#downloadCount'), statusMessage: $('#statusMessage'),
+    completeSection: $('#completeSection'), completeFilename: $('#completeFilename'),
     completeRecords: $('#completeRecords'),
-    btnOpenFolder: $('#btnOpenFolder'),
-    btnNewExport: $('#btnNewExport'),
-
-    settingsSection: $('#settingsSection'),
-    citationsFormat: $('#citationsFormat'),
-    batchSize: $('#batchSize'),
-    delayMs: $('#delayMs'),
-    saveAs: $('#saveAs'),
-    fullAbstracts: $('#fullAbstracts'),
-
-    btnStart: $('#btnStart'),
-    btnCancel: $('#btnCancel'),
+    btnOpenFolder: $('#btnOpenFolder'), btnNewExport: $('#btnNewExport'),
+    settingsSection: $('#settingsSection'), citationsFormat: $('#citationsFormat'),
+    batchSize: $('#batchSize'), delayMs: $('#delayMs'),
+    saveAs: $('#saveAs'), fullAbstracts: $('#fullAbstracts'),
+    btnStart: $('#btnStart'), btnCancel: $('#btnCancel'),
     btnDiagnostics: $('#btnDiagnostics'),
-    diagnosticsSection: $('#diagnosticsSection'),
-    diagnosticsContent: $('#diagnosticsContent'),
+    diagnosticsSection: $('#diagnosticsSection'), diagnosticsContent: $('#diagnosticsContent'),
   };
-
-  // ================================================================
-  // 状态
-  // ================================================================
 
   let port = null;
   let isExporting = false;
-  let lastTaskState = null;
 
   // ================================================================
   // 初始化
@@ -61,19 +38,16 @@
     await loadSettings();
     connectPort();
     bindEvents();
-    await detectCurrentTab();     // ★ 先检测标签页
-    await restoreTaskState();     // ★ 再恢复进度
+    await detectCurrentTab();
+    await restoreTaskState();
+
+    // ★ 监听 storage 变化（核心：content script 写 storage，popup 实时响应）
     chrome.storage.onChanged.addListener(onStorageChanged);
   }
 
   function connectPort() {
-    if (port) { try { port.disconnect(); } catch (e) { /* ignore */ } }
+    if (port) { try { port.disconnect(); } catch(e) {} }
     port = chrome.runtime.connect({ name: 'popup' });
-
-    port.onMessage.addListener((message) => {
-      if (message.action === 'stateUpdate') onTaskStateUpdate(message.state);
-    });
-
     port.onDisconnect.addListener(() => {
       port = null;
       setTimeout(() => { if (!port) connectPort(); }, 3000);
@@ -85,51 +59,46 @@
     els.btnCancel.addEventListener('click', onCancelExport);
     els.btnOpenFolder.addEventListener('click', onOpenFolder);
     els.btnNewExport.addEventListener('click', onNewExport);
-    els.citationsFormat.addEventListener('change', saveSettings);
-    els.batchSize.addEventListener('change', saveSettings);
-    els.delayMs.addEventListener('change', saveSettings);
-    els.saveAs.addEventListener('change', saveSettings);
-    els.fullAbstracts.addEventListener('change', saveSettings);
     els.btnDiagnostics.addEventListener('click', onDiagnostics);
+    [els.citationsFormat, els.batchSize, els.delayMs, els.saveAs, els.fullAbstracts]
+      .forEach(el => el.addEventListener('change', saveSettings));
   }
 
   // ================================================================
-  // 恢复任务状态
+  // Storage 变化处理 ★ 核心
   // ================================================================
-
-  async function restoreTaskState() {
-    try {
-      const result = await chrome.storage.local.get(['taskState']);
-      if (!result.taskState) return;
-      const state = result.taskState;
-
-      if (state.startTime && (Date.now() - state.startTime > 10 * 60 * 1000)) {
-        chrome.storage.local.remove('taskState').catch(() => {});
-        return;
-      }
-
-      if (['collecting', 'downloading', 'abstracts', 'merging', 'complete', 'error'].includes(state.status)) {
-        onTaskStateUpdate(state);
-      }
-    } catch (err) {
-      console.warn('[Popup] 恢复状态失败:', err.message);
-    }
-  }
 
   function onStorageChanged(changes, area) {
     if (area === 'local' && changes.taskState) {
       const state = changes.taskState.newValue;
-      if (state) onTaskStateUpdate(state);
+      if (state) render(state);
     }
   }
 
+  async function restoreTaskState() {
+    try {
+      const result = await chrome.storage.local.get(['taskState']);
+      if (result.taskState) {
+        const state = result.taskState;
+        if (state.startTime && (Date.now() - state.startTime > 10 * 60 * 1000)) {
+          chrome.storage.local.remove('taskState').catch(() => {});
+          return;
+        }
+        if (['collecting', 'downloading', 'abstracts', 'merging', 'complete', 'error']
+             .includes(state.status)) {
+          render(state);
+        }
+      }
+    } catch (err) { /* ignore */ }
+  }
+
   // ================================================================
-  // 状态更新
+  // 统一渲染
   // ================================================================
 
-  function onTaskStateUpdate(state) {
+  function render(state) {
     if (!state) return;
-    lastTaskState = state;
+    const p = state.progress || {};
 
     switch (state.status) {
       case 'idle':
@@ -140,13 +109,21 @@
         if (!isExporting) showExporting();
         els.phaseLabel.textContent = '📡 正在搜索...';
         els.collectStats.style.display = 'flex';
-        els.collectCount.textContent = `${state.progress?.collected || 0} / ${state.progress?.total || 0}`;
+        els.collectCount.textContent = `${p.collected || 0} / ${p.total || 0}`;
         els.downloadStats.style.display = 'none';
-        if (state.progress?.total > 0) {
-          els.progressBar.style.width = Math.min(Math.round(state.progress.collected / state.progress.total * 100), 95) + '%';
-        }
-        els.statusMessage.textContent =
-          `正在翻页收集文献 ID... 第 ${state.progress?.page || 0} / ${state.progress?.totalPages || '?'} 页`;
+        if (p.total > 0) els.progressBar.style.width = Math.min(Math.round(p.collected / p.total * 100), 95) + '%';
+        els.statusMessage.textContent = `正在翻页收集文献 ID... 第 ${p.page || 0} / ${p.totalPages || '?'} 页`;
+        break;
+
+      case 'abstracts':
+        if (!isExporting) showExporting();
+        els.phaseLabel.textContent = '📝 正在获取完整摘要...';
+        els.collectStats.style.display = 'none';
+        els.downloadStats.style.display = 'flex';
+        els.downloadCount.textContent = `${p.downloaded || 0} / ${p.total || 0}`;
+        if (p.total > 0) els.progressBar.style.width = Math.min(Math.round((p.downloaded || 0) / p.total * 100), 98) + '%';
+        els.statusMessage.textContent = `已处理 ${p.downloaded || 0} 篇` +
+          (p.enriched > 0 ? `（${p.enriched} 篇摘要已补全）` : '');
         break;
 
       case 'downloading':
@@ -154,26 +131,9 @@
         els.phaseLabel.textContent = '⬇️ 正在下载 RIS...';
         els.collectStats.style.display = 'none';
         els.downloadStats.style.display = 'flex';
-        els.downloadCount.textContent = `${state.progress?.downloaded || 0} / ${state.progress?.total || 0}`;
-        if (state.progress?.total > 0) {
-          els.progressBar.style.width = Math.min(Math.round((state.progress.downloaded || 0) / state.progress.total * 100), 98) + '%';
-        }
-        els.statusMessage.textContent =
-          `批量下载中... 第 ${state.progress?.batch || 0} / ${state.progress?.totalBatches || '?'} 批`;
-        break;
-
-      case 'abstracts':
-        // 获取完整摘要阶段
-        els.phaseLabel.textContent = '📝 正在获取完整摘要...';
-        els.collectStats.style.display = 'none';
-        els.downloadStats.style.display = 'flex';
-        els.downloadCount.textContent = `${state.progress?.downloaded || 0} / ${state.progress?.total || 0}`;
-        if (state.progress?.total > 0) {
-          els.progressBar.style.width = Math.min(Math.round((state.progress.downloaded || 0) / state.progress.total * 100), 98) + '%';
-        }
-        els.statusMessage.textContent =
-          `已处理 ${state.progress?.downloaded || 0} 篇` +
-          (state.progress?.enriched > 0 ? `（${state.progress.enriched} 篇摘要已补全）` : '');
+        els.downloadCount.textContent = `${p.downloaded || 0} / ${p.total || 0}`;
+        if (p.total > 0) els.progressBar.style.width = Math.min(Math.round((p.downloaded || 0) / p.total * 100), 98) + '%';
+        els.statusMessage.textContent = `构建中... 第 ${p.batch || 0} / ${p.totalBatches || '?'} 批`;
         break;
 
       case 'merging':
@@ -215,21 +175,15 @@
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       const tab = tabs[0];
       if (!tab || !tab.url) { showNotSearchPage(); return; }
-
       const url = tab.url;
-      const isIEEESearch = url.includes('ieeexplore.ieee.org') &&
-                           (url.includes('/search/') || url.includes('searchresult.jsp'));
-      if (!isIEEESearch) { showNotSearchPage(); return; }
-
-      const pingResult = await chrome.tabs.sendMessage(tab.id, { action: 'ping' });
-      if (!pingResult || pingResult.status !== 'ok') {
-        showNotSearchPage();
-        return;
+      if (!url.includes('ieeexplore.ieee.org') || !(url.includes('/search/') || url.includes('searchresult.jsp'))) {
+        showNotSearchPage(); return;
       }
-
-      const searchInfo = await chrome.tabs.sendMessage(tab.id, { action: 'getSearchInfo' });
-      if (searchInfo && searchInfo.queryText) {
-        showSearchInfo(searchInfo);
+      const pingResult = await chrome.tabs.sendMessage(tab.id, { action: 'ping' });
+      if (!pingResult || pingResult.status !== 'ok') { showNotSearchPage(); return; }
+      const info = await chrome.tabs.sendMessage(tab.id, { action: 'getSearchInfo' });
+      if (info && info.queryText) {
+        showSearchInfo(info);
         els.btnStart.disabled = false;
         els.btnStart.textContent = '🚀 开始导出全部';
       } else {
@@ -237,7 +191,7 @@
       }
     } catch (err) {
       console.warn('[Popup] 标签页检测失败:', err.message);
-      showNotSearchPage();
+      if (!isExporting) showNotSearchPage();
     }
   }
 
@@ -279,6 +233,7 @@
     isExporting = false;
     els.btnStart.style.display = 'block';
     els.btnStart.textContent = '🚀 开始导出全部';
+    els.btnStart.disabled = false;
     els.btnCancel.style.display = 'none';
     els.settingsSection.style.display = 'block';
     els.progressSection.style.display = 'none';
@@ -296,9 +251,8 @@
     els.completeSection.style.display = 'block';
     els.progressBar.classList.add('complete');
     els.progressBar.style.width = '100%';
-
-    els.completeFilename.textContent = state.lastFilename || lastTaskState?.lastFilename || '—';
-    els.completeRecords.textContent = state.progress?.total || state.progress?.downloaded || '—';
+    els.completeFilename.textContent = state.lastFilename || '—';
+    els.completeRecords.textContent = state.progress?.total || '—';
   }
 
   // ================================================================
@@ -307,7 +261,6 @@
 
   async function onStartExport() {
     if (isExporting) return;
-
     showExporting();
     els.progressBar.style.width = '0%';
     els.statusMessage.textContent = '正在初始化...';
@@ -318,8 +271,8 @@
       citationsFormat: els.citationsFormat.value,
       risFormat: 'download-ris',
       rowsPerPage: 100,
-      fullAbstracts: els.fullAbstracts.checked,  // ★ 完整摘要开关
-      saveAs: els.saveAs.checked   // ★ 传给 background
+      fullAbstracts: els.fullAbstracts.checked,
+      saveAs: els.saveAs.checked
     };
 
     if (port) {
@@ -328,10 +281,7 @@
       connectPort();
       setTimeout(() => {
         if (port) port.postMessage({ action: 'startExport', options });
-        else {
-          showIdle();
-          els.statusMessage.textContent = '❌ 无法连接到后台服务';
-        }
+        else { showIdle(); els.statusMessage.textContent = '❌ 无法连接后台服务'; }
       }, 500);
     }
   }
@@ -353,31 +303,27 @@
 
   async function onDiagnostics() {
     els.diagnosticsSection.style.display = 'block';
-    els.diagnosticsContent.innerHTML = '<div class="diag-row"><span class="diag-check">状态</span><span class="diag-value">正在检测...</span></div>';
-
+    els.diagnosticsContent.innerHTML = '<div class="diag-row"><span class="diag-value">正在检测...</span></div>';
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tabs.length) throw new Error('找不到活动标签页');
-
       const results = await chrome.tabs.sendMessage(tabs[0].id, { action: 'runDiagnostics' });
       if (!results || results.error) {
-        els.diagnosticsContent.innerHTML = `<div class="diag-row fail"><span class="diag-value">${results?.error || '无响应'}</span></div>`;
+        els.diagnosticsContent.innerHTML = `<div class="diag-row fail">${escapeHtml(results?.error || '无响应')}</div>`;
         return;
       }
-
       let html = '';
       for (const r of results) {
         const val = String(r.value || '—');
-        let rowClass = '';
-        if (val.includes('失败') || val.includes('HTTP 4') || val.includes('HTTP 5')) rowClass = 'fail';
-        else if (val.includes('未找到') || val.includes('未检测到')) rowClass = 'warn';
-        else rowClass = 'pass';
-        html += `<div class="diag-row ${rowClass}"><span class="diag-check">${r.check}</span><span class="diag-value">${escapeHtml(val)}</span></div>`;
+        let cls = '';
+        if (/失败|HTTP [45]/.test(val)) cls = 'fail';
+        else if (/未找到|未检测到/.test(val)) cls = 'warn';
+        else cls = 'pass';
+        html += `<div class="diag-row ${cls}"><span class="diag-check">${r.check}</span><span class="diag-value">${escapeHtml(val)}</span></div>`;
       }
       els.diagnosticsContent.innerHTML = html;
-
     } catch (err) {
-      els.diagnosticsContent.innerHTML = `<div class="diag-row fail"><span class="diag-value">诊断失败: ${escapeHtml(err.message)}</span></div>`;
+      els.diagnosticsContent.innerHTML = `<div class="diag-row fail">${escapeHtml(err.message)}</div>`;
     }
   }
 
@@ -388,7 +334,7 @@
   }
 
   // ================================================================
-  // 设置持久化
+  // 设置
   // ================================================================
 
   async function loadSettings() {
@@ -402,9 +348,7 @@
         if (s.saveAs !== undefined) els.saveAs.checked = s.saveAs;
         if (s.fullAbstracts !== undefined) els.fullAbstracts.checked = s.fullAbstracts;
       }
-    } catch (err) {
-      console.warn('[Popup] 加载设置失败:', err.message);
-    }
+    } catch (err) { console.warn('[Popup] 加载设置失败:', err.message); }
   }
 
   async function saveSettings() {
@@ -416,18 +360,11 @@
           delayMs: parseInt(els.delayMs.value, 10),
           saveAs: els.saveAs.checked,
           fullAbstracts: els.fullAbstracts.checked,
-          risFormat: 'download-ris',
-          rowsPerPage: 100
+          risFormat: 'download-ris', rowsPerPage: 100
         }
       });
-    } catch (err) {
-      console.warn('[Popup] 保存设置失败:', err.message);
-    }
+    } catch (err) { console.warn('[Popup] 保存设置失败:', err.message); }
   }
-
-  // ================================================================
-  // 启动
-  // ================================================================
 
   document.addEventListener('DOMContentLoaded', init);
 })();
