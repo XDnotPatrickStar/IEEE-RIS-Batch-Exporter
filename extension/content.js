@@ -175,8 +175,8 @@
 
         const enrichResult = await IEEE_API.enrichWithFullAbstracts(
           metadataRecords, {
-            delayMs: Math.max(delayMs, 800),
-            batchSize: 2,
+            delayMs: Math.max(delayMs, 300),   // CrossRef API 很快
+            batchSize: 4,
             onProgress: (prog) => {
               updateStorageState({
                 status: 'abstracts',

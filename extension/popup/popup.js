@@ -122,8 +122,8 @@
         els.downloadStats.style.display = 'flex';
         els.downloadCount.textContent = `${p.downloaded || 0} / ${p.total || 0}`;
         if (p.total > 0) els.progressBar.style.width = Math.min(Math.round((p.downloaded || 0) / p.total * 100), 98) + '%';
-        els.statusMessage.textContent = `已处理 ${p.downloaded || 0} 篇` +
-          (p.enriched > 0 ? `（${p.enriched} 篇摘要已补全）` : '');
+        els.statusMessage.textContent = `通过 CrossRef 获取完整摘要中... 已处理 ${p.downloaded || 0} 篇` +
+          (p.enriched > 0 ? `（${p.enriched} 篇已补全）` : '');
         break;
 
       case 'downloading':

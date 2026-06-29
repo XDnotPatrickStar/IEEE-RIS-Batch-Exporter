@@ -478,62 +478,26 @@ const IEEE_API = (() => {
   }
 
   /**
-   * 从文章 HTML 页面提取完整摘要
-   * 原理：所有 REST API 都截断 abstract，只有渲染的 HTML 页面有完整文本
+   * 从 CrossRef API 获取完整摘要（通过 DOI）
+   * IEEE 所有 API 都截断 abstract，HTML 页面用 JS 渲染也无法直接抓。
+   * CrossRef 免费开放，无认证，返回 publisher 存入的完整摘要。
    */
-  async function fetchFullAbstract(articleNumber, signal) {
-    const htmlUrl = `https://ieeexplore.ieee.org/document/${articleNumber}/`;
+  async function fetchFullAbstract(doi, signal) {
+    if (!doi) return null;
+    const url = `https://api.crossref.org/works/${encodeURIComponent(doi)}`;
     try {
-      const resp = await fetch(htmlUrl, {
+      const resp = await fetch(url, {
         method: 'GET',
-        headers: { 'Accept': 'text/html', 'Referer': window.location.href },
-        credentials: 'include',
+        headers: { 'Accept': 'application/json' },
         signal
       });
       if (!resp.ok) return null;
-
-      const html = await resp.text();
-      // 用 DOMParser 解析
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
-
-      // 尝试多个常见的摘要容器选择器
-      const selectors = [
-        '.abstract-text',           // 最常见
-        '.doc-abstract',            // 旧版
-        '.u-mb-1 .u-text-justify',  // 新版布局
-        '.abstract-description',
-        '[class*="abstract"]',       // 模糊匹配
-        'div[class*="Abstract"]',
-        '.article-abstract',
-        '.document-abstract'
-      ];
-
-      for (const sel of selectors) {
-        const el = doc.querySelector(sel);
-        if (el && el.textContent.trim().length > 50) {
-          return el.textContent.trim();
-        }
+      const data = await resp.json();
+      const abs = data?.message?.abstract || '';
+      // CrossRef 返回的 abstract 可能包含 HTML 标签（<jats:p> 等）
+      if (abs && abs.length > 10) {
+        return stripHtml(abs);
       }
-
-      // 备用：找到 "Abstract" 标题后面的内容
-      const headings = doc.querySelectorAll('h1, h2, h3, h4, strong, b, .section-title');
-      for (const h of headings) {
-        if (h.textContent.trim().toLowerCase() === 'abstract') {
-          // 获取下一个兄弟元素的内容
-          let next = h.nextElementSibling;
-          if (next && next.textContent.trim().length > 50) {
-            return next.textContent.trim();
-          }
-          // 有些布局中 text 在父元素之后
-          let parent = h.parentElement;
-          if (parent) {
-            const text = parent.textContent.replace(/^\s*Abstract\s*/i, '').trim();
-            if (text.length > 50) return text;
-          }
-        }
-      }
-
       return null;
     } catch (e) {
       if (e.name === 'AbortError') throw e;
@@ -541,34 +505,44 @@ const IEEE_API = (() => {
     }
   }
 
+  function stripHtml(html) {
+    try {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const text = doc.body.textContent || '';
+      return text.replace(/\s+/g, ' ').trim();
+    } catch(e) {
+      return html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    }
+  }
+
   /**
-   * 批量获取完整摘要
+   * 批量获取完整摘要（CrossRef DOI → abstract）
    */
   async function enrichWithFullAbstracts(records, options = {}) {
-    const { delayMs = 500, batchSize = 2, onProgress, signal } = options;
+    const { delayMs = 300, batchSize = 4, onProgress, signal } = options;
     if (!records || records.length === 0) return { records, stats: { enriched: 0, total: 0, failed: 0, skipped: 0 } };
 
     const total = records.length;
     let enriched = 0, failed = 0, skipped = 0;
 
-    console.log(`[IEEE API] 从HTML页面提取 ${total} 篇文章的完整摘要...`);
+    console.log(`[IEEE API] 通过 CrossRef 获取 ${total} 篇文章的完整摘要（并发=${batchSize}）...`);
 
     for (let i = 0; i < total; i += batchSize) {
       if (signal?.aborted) throw new DOMException('用户取消', 'AbortError');
 
       const batch = records.slice(i, i + batchSize);
       const promises = batch.map(async (record) => {
-        const an = record.articleNumber;
-        if (!an) { skipped++; return; }
+        const doi = record.doi;
+        if (!doi) { skipped++; return; }
 
         const currentAbs = record.abstract || record.abstractText || '';
-        const fullAbs = await fetchFullAbstract(an, signal);
+        const fullAbs = await fetchFullAbstract(doi, signal);
 
         if (fullAbs && fullAbs.length > currentAbs.length) {
           record.abstract = fullAbs;
           enriched++;
           if (enriched <= 2) {
-            console.log(`[IEEE API] #${an}: ${currentAbs.length} → ${fullAbs.length} 字符`);
+            console.log(`[CrossRef] ${doi}: ${currentAbs.length} → ${fullAbs.length} 字符`);
           }
         } else if (fullAbs) {
           failed++;
@@ -582,7 +556,7 @@ const IEEE_API = (() => {
       if (i + batchSize < total) await sleep(delayMs);
     }
 
-    console.log(`[IEEE API] 完成: ${enriched} 增强, ${failed} 无变化, ${skipped} 跳过`);
+    console.log(`[CrossRef] 完成: ${enriched} 增强, ${failed} 无变化, ${skipped} 跳过`);
     return { records, stats: { enriched, total, failed, skipped } };
   }
 
