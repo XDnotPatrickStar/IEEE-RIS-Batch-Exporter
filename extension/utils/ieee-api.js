@@ -536,10 +536,6 @@ const IEEE_API = (() => {
     }
     return null;
   }
-      }
-    }
-    return null;
-  }
 
   /**
    * 批量获取完整摘要，用文档 API 的完整摘要替换搜索 API 的截断摘要
