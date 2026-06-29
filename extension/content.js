@@ -92,7 +92,8 @@
       queryText: optQuery, queryParams = {}, rowsPerPage = 100,
       batchSize = 50, delayMs = 500,
       citationsFormat = 'citation-and-abstract',
-      saveAs = true
+      saveAs = true,
+      fullAbstracts = true   // ★ 新增：是否获取完整摘要
     } = options;
 
     // ★ 标记运行中，防止重入
@@ -117,7 +118,7 @@
       // ===== 阶段 1：收集完整元数据（不只是 ID） =====
       sendToBackground({ action: 'collectionProgress', phase: 'collecting', collected: 0, total: 0, page: 0 });
 
-      const metadataRecords = await IEEE_API.collectAllMetadata(
+      let metadataRecords = await IEEE_API.collectAllMetadata(
         { queryText, rowsPerPage, queryParams: qp },
         (progress) => {
           sendToBackground({
@@ -144,14 +145,40 @@
         articleNumbers, totalRecords: articleNumbers.length, queryText
       });
 
-      // ===== 阶段 2：下载 RIS（端点优先 → 元数据构建兜底） =====
+      // ===== 阶段 2：获取完整摘要（可选但推荐） =====
+      if (fullAbstracts && citationsFormat === 'citation-and-abstract') {
+        sendToBackground({
+          action: 'downloadProgress', phase: 'abstracts',
+          downloaded: 0, total: articleNumbers.length, batch: 0, totalBatches: 0
+        });
+
+        const enrichResult = await IEEE_API.enrichWithFullAbstracts(
+          metadataRecords, {
+            delayMs: Math.max(delayMs, 250),
+            batchSize: 3,
+            onProgress: (prog) => {
+              sendToBackground({
+                action: 'downloadProgress', phase: 'abstracts',
+                downloaded: prog.enriched, total: prog.total,
+                batch: prog.current, totalBatches: 0
+              });
+            },
+            signal
+          }
+        );
+
+        if (signal.aborted) return;
+        console.log(`[Content] 摘要增强: ${enrichResult.stats.enriched} 篇已补全, ${enrichResult.stats.failed} 篇无变化`);
+      }
+
+      // ===== 阶段 3：下载 RIS（端点优先 → 元数据构建兜底） =====
       const totalBatches = Math.ceil(articleNumbers.length / batchSize);
       sendToBackground({
         action: 'downloadProgress', phase: 'downloading',
         downloaded: 0, total: articleNumbers.length, batch: 0, totalBatches
       });
 
-      // ★ 把全部元数据传给 downloadAllRIS 作为 fallback
+      // ★ 把已增强的元数据传给 downloadAllRIS 作为 fallback
       const { risText, stats } = await IEEE_API.downloadAllRIS(
         articleNumbers, {
           batchSize, delayMs,
@@ -164,7 +191,7 @@
             });
           },
           signal,
-          metadataRecords  // ★ 关键：元数据作为 fallback
+          metadataRecords  // ★ 此时 abstract 字段已是完整摘要
         }
       );
 

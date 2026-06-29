@@ -477,8 +477,101 @@ const IEEE_API = (() => {
     };
   }
 
-  // ──────────────────────────────────────────────────────────
-  // DOM 备用
+  /**
+   * 从文章详情 API 获取单篇文章的完整摘要
+   * /rest/document/{articleNumber}/abstract 返回 JSON: { title, abstract, ... }
+   */
+  async function fetchFullAbstract(articleNumber, signal) {
+    const url = `${DOC_URL}${articleNumber}/abstract`;
+    try {
+      const resp = await fetch(url, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json, text/plain, */*', 'Referer': window.location.href },
+        credentials: 'include',
+        signal
+      });
+      if (!resp.ok) return null;  // 404/403 等静默跳过
+      const data = await resp.json();
+      // 返回完整摘要文本（取最长的可选字段）
+      return data.abstract || data.text || data.content || null;
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      return null;  // 网络错误，静默跳过
+    }
+  }
+
+  /**
+   * 批量获取完整摘要，用文档 API 的完整摘要替换搜索 API 的截断摘要
+   * @param {Array} records - 搜索 API 收集的元数据记录
+   * @param {Object} options
+   * @param {number} options.delayMs - 请求间隔
+   * @param {number} options.batchSize - 并发数（1-5，太大容易限流）
+   * @param {Function} options.onProgress - 进度回调 ({ enriched, total, current })
+   * @param {AbortSignal} options.signal
+   * @returns {Promise<{records: Array, stats: Object}>}
+   */
+  async function enrichWithFullAbstracts(records, options = {}) {
+    const {
+      delayMs = 250,
+      batchSize = 3,   // 并发 3 个请求
+      onProgress,
+      signal
+    } = options;
+
+    if (!records || records.length === 0) return { records, stats: { enriched: 0, total: 0, failed: 0 } };
+
+    const total = records.length;
+    let enriched = 0;
+    let failed = 0;
+    let skipped = 0;
+
+    console.log(`[IEEE API] 开始获取 ${total} 篇文章的完整摘要 (并发=${batchSize}, 间隔=${delayMs}ms)...`);
+
+    // 处理多个并发批次
+    for (let i = 0; i < total; i += batchSize) {
+      if (signal?.aborted) throw new DOMException('用户取消', 'AbortError');
+
+      const batch = records.slice(i, i + batchSize);
+      const promises = batch.map(async (record) => {
+        const an = record.articleNumber;
+        if (!an) { skipped++; return; }
+
+        // 先检查搜索 API 的摘要是否已完整（超过 500 字符通常完整）
+        const currentAbstract = record.abstract || record.abstractText || '';
+        if (currentAbstract.length > 500) {
+          // 已经很完整了，跳过
+          return;
+        }
+
+        const fullAbs = await fetchFullAbstract(an, signal);
+        if (fullAbs && fullAbs.length > currentAbstract.length) {
+          record.abstract = fullAbs;
+          enriched++;
+        } else if (fullAbs) {
+          // API 返回了但更短，保留原来的
+          failed++;
+        } else {
+          failed++;
+        }
+      });
+
+      await Promise.all(promises);
+
+      if (onProgress) {
+        onProgress({ enriched, total, failed, current: Math.min(i + batchSize, total) });
+      }
+
+      if (i + batchSize < total) {
+        await sleep(delayMs);
+      }
+    }
+
+    console.log(`[IEEE API] 完整摘要获取完成: ${enriched} 篇已增强, ${failed} 篇无变化, ${skipped} 篇跳过`);
+    return {
+      records,
+      stats: { enriched, total, failed, skipped }
+    };
+  }
   // ──────────────────────────────────────────────────────────
 
   function extractArticleNumbersFromDOM() {
@@ -573,6 +666,8 @@ const IEEE_API = (() => {
     downloadRISBatch,
     downloadAllRIS,
     tryAllDownloadEndpoints,
+    fetchFullAbstract,
+    enrichWithFullAbstracts,
     extractArticleNumbersFromDOM,
     extractTotalCountFromDOM,
     extractCSRFToken,

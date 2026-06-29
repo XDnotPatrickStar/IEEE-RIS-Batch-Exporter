@@ -36,6 +36,7 @@
     batchSize: $('#batchSize'),
     delayMs: $('#delayMs'),
     saveAs: $('#saveAs'),
+    fullAbstracts: $('#fullAbstracts'),
 
     btnStart: $('#btnStart'),
     btnCancel: $('#btnCancel'),
@@ -88,6 +89,7 @@
     els.batchSize.addEventListener('change', saveSettings);
     els.delayMs.addEventListener('change', saveSettings);
     els.saveAs.addEventListener('change', saveSettings);
+    els.fullAbstracts.addEventListener('change', saveSettings);
     els.btnDiagnostics.addEventListener('click', onDiagnostics);
   }
 
@@ -106,7 +108,7 @@
         return;
       }
 
-      if (['collecting', 'downloading', 'merging', 'complete', 'error'].includes(state.status)) {
+      if (['collecting', 'downloading', 'abstracts', 'merging', 'complete', 'error'].includes(state.status)) {
         onTaskStateUpdate(state);
       }
     } catch (err) {
@@ -158,6 +160,19 @@
         }
         els.statusMessage.textContent =
           `批量下载中... 第 ${state.progress?.batch || 0} / ${state.progress?.totalBatches || '?'} 批`;
+        break;
+
+      case 'abstracts':
+        // 获取完整摘要阶段
+        els.phaseLabel.textContent = '📝 正在获取完整摘要...';
+        els.collectStats.style.display = 'none';
+        els.downloadStats.style.display = 'flex';
+        els.downloadCount.textContent = `${state.progress?.downloaded || 0} / ${state.progress?.total || 0}`;
+        if (state.progress?.total > 0) {
+          els.progressBar.style.width = Math.min(Math.round((state.progress.downloaded || 0) / state.progress.total * 100), 98) + '%';
+        }
+        els.statusMessage.textContent =
+          '逐篇获取完整摘要中，约200ms/篇，请耐心等待...';
         break;
 
       case 'merging':
@@ -302,6 +317,7 @@
       citationsFormat: els.citationsFormat.value,
       risFormat: 'download-ris',
       rowsPerPage: 100,
+      fullAbstracts: els.fullAbstracts.checked,  // ★ 完整摘要开关
       saveAs: els.saveAs.checked   // ★ 传给 background
     };
 
@@ -383,6 +399,7 @@
         if (s.batchSize) els.batchSize.value = String(s.batchSize);
         if (s.delayMs) els.delayMs.value = String(s.delayMs);
         if (s.saveAs !== undefined) els.saveAs.checked = s.saveAs;
+        if (s.fullAbstracts !== undefined) els.fullAbstracts.checked = s.fullAbstracts;
       }
     } catch (err) {
       console.warn('[Popup] 加载设置失败:', err.message);
@@ -397,6 +414,7 @@
           batchSize: parseInt(els.batchSize.value, 10),
           delayMs: parseInt(els.delayMs.value, 10),
           saveAs: els.saveAs.checked,
+          fullAbstracts: els.fullAbstracts.checked,
           risFormat: 'download-ris',
           rowsPerPage: 100
         }

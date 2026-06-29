@@ -157,7 +157,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
 
         case 'downloadProgress':
-          taskState.status = message.phase === 'merging' ? TaskState.MERGING : TaskState.DOWNLOADING;
+          // abstracts 阶段用不同的状态名
+          if (message.phase === 'abstracts') {
+            taskState.status = 'abstracts';
+          } else if (message.phase === 'merging') {
+            taskState.status = TaskState.MERGING;
+          } else {
+            taskState.status = TaskState.DOWNLOADING;
+          }
           taskState.progress = {
             ...taskState.progress,
             phase: message.phase || 'downloading',
@@ -237,7 +244,8 @@ async function handleStartExport(options = {}) {
       delayMs: options.delayMs || 500,
       risFormat: options.risFormat || 'download-ris',
       citationsFormat: options.citationsFormat || 'citation-and-abstract',
-      saveAs: options.saveAs !== undefined ? options.saveAs : true  // ★
+      saveAs: options.saveAs !== undefined ? options.saveAs : true,  // ★
+      fullAbstracts: options.fullAbstracts !== undefined ? options.fullAbstracts : true  // ★
     };
 
     await chrome.tabs.sendMessage(tab.id, {
