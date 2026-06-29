@@ -171,7 +171,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             downloaded: message.downloaded,
             total: message.total,
             batch: message.batch || 0,
-            totalBatches: message.totalBatches || 0
+            totalBatches: message.totalBatches || 0,
+            enriched: message.enriched,   // ★ 摘要阶段
+            failed: message.failed        // ★ 摘要阶段
           };
           persistState();
           broadcastState();

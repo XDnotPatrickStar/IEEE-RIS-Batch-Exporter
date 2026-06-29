@@ -172,7 +172,8 @@
           els.progressBar.style.width = Math.min(Math.round((state.progress.downloaded || 0) / state.progress.total * 100), 98) + '%';
         }
         els.statusMessage.textContent =
-          '从文章页面提取完整摘要中（每篇约0.5-1秒），请耐心等待...';
+          `已处理 ${state.progress?.downloaded || 0} 篇` +
+          (state.progress?.enriched > 0 ? `（${state.progress.enriched} 篇摘要已补全）` : '');
         break;
 
       case 'merging':
