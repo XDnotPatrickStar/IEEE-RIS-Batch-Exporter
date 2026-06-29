@@ -478,105 +478,80 @@ const IEEE_API = (() => {
   }
 
   /**
-   * 从文章详情 API 获取完整摘要
-   * 尝试多个端点 + 详细诊断日志
+   * 从文章 HTML 页面提取完整摘要
+   * 原理：所有 REST API 都截断 abstract，只有渲染的 HTML 页面有完整文本
    */
   async function fetchFullAbstract(articleNumber, signal) {
-    const urls = [
-      `${DOC_URL}${articleNumber}/abstract`,
-      `${DOC_URL}${articleNumber}`,
-    ];
+    const htmlUrl = `https://ieeexplore.ieee.org/document/${articleNumber}/`;
+    try {
+      const resp = await fetch(htmlUrl, {
+        method: 'GET',
+        headers: { 'Accept': 'text/html', 'Referer': window.location.href },
+        credentials: 'include',
+        signal
+      });
+      if (!resp.ok) return null;
 
-    for (const url of urls) {
-      try {
-        const resp = await fetch(url, {
-          method: 'GET',
-          headers: { 'Accept': 'application/json, text/plain, */*', 'Referer': window.location.href },
-          credentials: 'include',
-          signal
-        });
-        if (!resp.ok) continue;
-        const data = await resp.json();
+      const html = await resp.text();
+      // 用 DOMParser 解析
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
 
-        // ★ 诊断：打印一次
-        if (window.__ieee_debug_abs !== true) {
-          window.__ieee_debug_abs = true;
-          console.log(`[IEEE API DEBUG] URL: ${url}`);
-          console.log(`[IEEE API DEBUG] HTTP: ${resp.status}`);
-          console.log(`[IEEE API DEBUG] data.abstract: len=${(data.abstract||'').length}, endsWith="${(data.abstract||'').slice(-50)}"`);
-          // 深入检查 sections.abstract
-          if (data.sections && typeof data.sections === 'object') {
-            console.log(`[IEEE API DEBUG] sections keys:`, Object.keys(data.sections).join(', '));
-            for (const [sk, sv] of Object.entries(data.sections)) {
-              if (typeof sv === 'string') {
-                console.log(`[IEEE API DEBUG]   sections.${sk}: len=${sv.length}, endsWith="${sv.slice(-50)}"`);
-              } else if (typeof sv === 'object' && sv !== null) {
-                console.log(`[IEEE API DEBUG]   sections.${sk}: type=${Array.isArray(sv)?'array('+sv.length+')':'object'}, keys=`, Object.keys(sv).join(','));
-              }
-            }
-          }
-          // 也检查 htmlAbstractLink
-          console.log(`[IEEE API DEBUG] htmlAbstractLink: ${data.htmlAbstractLink || 'N/A'}`);
+      // 尝试多个常见的摘要容器选择器
+      const selectors = [
+        '.abstract-text',           // 最常见
+        '.doc-abstract',            // 旧版
+        '.u-mb-1 .u-text-justify',  // 新版布局
+        '.abstract-description',
+        '[class*="abstract"]',       // 模糊匹配
+        'div[class*="Abstract"]',
+        '.article-abstract',
+        '.document-abstract'
+      ];
+
+      for (const sel of selectors) {
+        const el = doc.querySelector(sel);
+        if (el && el.textContent.trim().length > 50) {
+          return el.textContent.trim();
         }
-
-        // ★ 策略1: data.abstract (已经是完整摘要)
-        const abs = data.abstract || '';
-        if (abs.length > 10) return abs;
-
-        // ★ 策略2: sections.abstract 下的文本
-        if (data.sections?.abstract) {
-          const sabs = data.sections.abstract;
-          if (typeof sabs === 'string' && sabs.length > 10) return sabs;
-          if (sabs?.text) return sabs.text;
-          if (sabs?.content) return sabs.content;
-          if (sabs?.body) return sabs.body;
-          // sections.abstract 本身可能就是摘要内容
-          const sabsStr = JSON.stringify(sabs);
-          if (sabsStr.length > 10) {
-            console.warn(`[IEEE API] sections.abstract 是复杂对象，raw:`, sabsStr.slice(0, 200));
-          }
-        }
-
-      } catch (e) {
-        if (e.name === 'AbortError') throw e;
-        console.warn(`[IEEE API] ${url} 请求失败:`, e.message);
       }
+
+      // 备用：找到 "Abstract" 标题后面的内容
+      const headings = doc.querySelectorAll('h1, h2, h3, h4, strong, b, .section-title');
+      for (const h of headings) {
+        if (h.textContent.trim().toLowerCase() === 'abstract') {
+          // 获取下一个兄弟元素的内容
+          let next = h.nextElementSibling;
+          if (next && next.textContent.trim().length > 50) {
+            return next.textContent.trim();
+          }
+          // 有些布局中 text 在父元素之后
+          let parent = h.parentElement;
+          if (parent) {
+            const text = parent.textContent.replace(/^\s*Abstract\s*/i, '').trim();
+            if (text.length > 50) return text;
+          }
+        }
+      }
+
+      return null;
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      return null;
     }
-    return null;
   }
 
   /**
-   * 批量获取完整摘要，用文档 API 的完整摘要替换搜索 API 的截断摘要
-   * ★ 不再有阈值判断——始终尝试拉取完整摘要
-   * @param {Array} records - 搜索 API 收集的元数据记录
-   * @param {Object} options
-   * @param {number} options.delayMs - 请求间隔
-   * @param {number} options.batchSize - 并发数（1-5）
-   * @param {Function} options.onProgress - 进度回调 ({ enriched, total, current })
-   * @param {AbortSignal} options.signal
-   * @returns {Promise<{records: Array, stats: Object}>}
+   * 批量获取完整摘要
    */
   async function enrichWithFullAbstracts(records, options = {}) {
-    const {
-      delayMs = 250,
-      batchSize = 3,
-      onProgress,
-      signal
-    } = options;
-
+    const { delayMs = 500, batchSize = 2, onProgress, signal } = options;
     if (!records || records.length === 0) return { records, stats: { enriched: 0, total: 0, failed: 0, skipped: 0 } };
 
     const total = records.length;
-    let enriched = 0;
-    let failed = 0;
-    let skipped = 0;
+    let enriched = 0, failed = 0, skipped = 0;
 
-    console.log(`[IEEE API] 开始获取 ${total} 篇文章的完整摘要...`);
-
-    // ★ 输出第一个样例，用于诊断
-    const sample = records[0];
-    const sampleAbs = (sample.abstract || sample.abstractText || '');
-    console.log(`[IEEE API] 样例 #${sample.articleNumber}: 搜索API摘要长度=${sampleAbs.length}, 末尾=${sampleAbs.slice(-40)}`);
+    console.log(`[IEEE API] 从HTML页面提取 ${total} 篇文章的完整摘要...`);
 
     for (let i = 0; i < total; i += batchSize) {
       if (signal?.aborted) throw new DOMException('用户取消', 'AbortError');
@@ -586,21 +561,15 @@ const IEEE_API = (() => {
         const an = record.articleNumber;
         if (!an) { skipped++; return; }
 
-        const currentAbstract = record.abstract || record.abstractText || '';
-
-        // ★ 无条件请求完整摘要
+        const currentAbs = record.abstract || record.abstractText || '';
         const fullAbs = await fetchFullAbstract(an, signal);
 
-        if (fullAbs && fullAbs.length > currentAbstract.length * 1.1) {
-          // 新摘要至少比旧的长 10% 才替换
-          if (enriched < 3) {
-            console.log(`[IEEE API] #${an}: ${currentAbstract.length} → ${fullAbs.length} 字符 (+${fullAbs.length - currentAbstract.length})`);
+        if (fullAbs && fullAbs.length > currentAbs.length) {
+          record.abstract = fullAbs;
+          enriched++;
+          if (enriched <= 2) {
+            console.log(`[IEEE API] #${an}: ${currentAbs.length} → ${fullAbs.length} 字符`);
           }
-          record.abstract = fullAbs;
-          enriched++;
-        } else if (fullAbs && fullAbs.length > currentAbstract.length) {
-          record.abstract = fullAbs;
-          enriched++;
         } else if (fullAbs) {
           failed++;
         } else {
@@ -609,17 +578,11 @@ const IEEE_API = (() => {
       });
 
       await Promise.all(promises);
-
-      if (onProgress) {
-        onProgress({ enriched, total, failed, current: Math.min(i + batchSize, total) });
-      }
-
-      if (i + batchSize < total) {
-        await sleep(delayMs);
-      }
+      if (onProgress) onProgress({ enriched, total, failed, current: Math.min(i + batchSize, total) });
+      if (i + batchSize < total) await sleep(delayMs);
     }
 
-    console.log(`[IEEE API] 完整摘要完成: ${enriched} 增强, ${failed} 无变化, ${skipped} 跳过`);
+    console.log(`[IEEE API] 完成: ${enriched} 增强, ${failed} 无变化, ${skipped} 跳过`);
     return { records, stats: { enriched, total, failed, skipped } };
   }
 

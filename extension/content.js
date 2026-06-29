@@ -154,8 +154,8 @@
 
         const enrichResult = await IEEE_API.enrichWithFullAbstracts(
           metadataRecords, {
-            delayMs: Math.max(delayMs, 250),
-            batchSize: 3,
+            delayMs: Math.max(delayMs, 800),   // HTML 页面比 API 更慢
+            batchSize: 2,                       // 只并发 2 个请求
             onProgress: (prog) => {
               sendToBackground({
                 action: 'downloadProgress', phase: 'abstracts',
