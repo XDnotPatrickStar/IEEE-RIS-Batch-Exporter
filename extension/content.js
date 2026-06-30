@@ -74,7 +74,7 @@
       } catch(e) {}
     }
     return { url, queryText, queryParams,
-      totalRecords: totalRecords || IEEE_API.extractTotalCountFromDOM() || '未知',
+      totalRecords: totalRecords || '未知',
       isSearchPage: true };
   }
 
@@ -197,53 +197,29 @@
         console.log(`[Content] 摘要增强: ${enrichResult.stats.enriched} 篇已补全, ${enrichResult.stats.failed} 篇无变化`);
       }
 
-      // ===== 阶段 3：构建 RIS =====
+      // ===== 阶段 3：构建 RIS（直接从元数据，不再尝试任何端点）=====
       updateStorageState({
         status: 'downloading',
-        progress: {
-          phase: 'downloading',
-          downloaded: 0,
-          total: articleNumbers.length,
-          batch: 0,
-          totalBatches: Math.ceil(articleNumbers.length / batchSize)
-        }
+        progress: { phase: 'downloading', downloaded: 0, total: articleNumbers.length }
       });
 
-      const { risText, stats } = await IEEE_API.downloadAllRIS(
-        articleNumbers, {
-          batchSize, delayMs,
-          risFormat: 'download-ris', citationsFormat,
-          onProgress: (prog) => {
-            updateStorageState({
-              status: 'downloading',
-              progress: {
-                phase: 'downloading',
-                downloaded: prog.downloaded,
-                total: prog.total,
-                batch: prog.batch,
-                totalBatches: prog.totalBatches
-              }
-            });
-          },
-          signal,
-          metadataRecords
-        }
-      );
+      // ★ 直接用增强过的元数据构建 RIS，不再调用 downloadAllRIS
+      const risText = IEEE_API.buildRISFromMetadata(metadataRecords, citationsFormat);
 
       if (signal.aborted) { isRunning = false; return; }
 
-      if (stats.totalDownloaded === 0) {
-        setErrorAndStop('所有批次均失败。');
-        isRunning = false;
-        return;
+      updateStorageState({
+        status: 'merging',
+        progress: { phase: 'merging', downloaded: articleNumbers.length, total: articleNumbers.length }
+      });
+
+      // ★ 输出第一个摘要的尾部用于诊断
+      if (metadataRecords.length > 0) {
+        const firstAbs = metadataRecords[0].abstract || '';
+        console.log(`[Content] RIS 已构建, 样例摘要: ${firstAbs.length}字符, 尾部="${firstAbs.slice(-60)}"`);
       }
 
       // ===== 阶段 4：合并去重 =====
-      updateStorageState({
-        status: 'merging',
-        progress: { phase: 'merging', downloaded: stats.totalDownloaded, total: stats.totalRequested }
-      });
-
       const mergeResult = RIS_MERGER.mergeFast([risText], { dedupField: 'AN', keepFirst: true });
 
       const finalRIS = RIS_MERGER.addMetaComment(mergeResult.text, {
