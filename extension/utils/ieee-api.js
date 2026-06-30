@@ -215,7 +215,7 @@ const IEEE_API = (() => {
 
   async function enrichWithFullAbstracts(records, options = {}) {
     // ★ 降低并发避免 429：2并发、500ms间隔
-    const { delayMs = 500, batchSize = 2, onProgress, signal } = options;
+    const { delayMs = 100, batchSize = 6, onProgress, signal } = options;
     if (!records || records.length === 0) return { records, stats: { enriched: 0, total: 0 } };
 
     const total = records.length;
