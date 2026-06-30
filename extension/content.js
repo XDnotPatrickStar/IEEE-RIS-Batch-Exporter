@@ -185,7 +185,7 @@
                   downloaded: prog.current,
                   total: prog.total,
                   enriched: prog.enriched,
-                  failed: prog.failed
+                  failed: prog.noChange || 0
                 }
               });
             },

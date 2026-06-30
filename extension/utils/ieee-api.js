@@ -134,29 +134,87 @@ const IEEE_API = (() => {
       .filter(Boolean).join('\n');
   }
 
-  // ── CrossRef 完整摘要 ────────────────────────────────────
+  // ── 完整摘要（三层后备）─────────────────────────────────
 
+  function stripHtmlTags(raw) {
+    try {
+      const doc = new DOMParser().parseFromString(raw, 'text/html');
+      return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
+    } catch(e) {
+      return raw.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  /**
+   * 尝试多个免费 API，取最长的摘要
+   */
   async function fetchFullAbstract(doi, signal) {
     if (!doi) return null;
-    try {
-      const resp = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {
-        headers: { 'Accept': 'application/json' }, signal
-      });
-      if (!resp.ok) return null;
-      const data = await resp.json();
-      const raw = data?.message?.abstract || '';
-      if (!raw || raw.length < 10) return null;
-      // 去 HTML 标签
-      try {
-        const doc = new DOMParser().parseFromString(raw, 'text/html');
-        return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
-      } catch(e) {
-        return raw.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+
+    const sources = [
+      {
+        name: 'CrossRef',
+        fn: async () => {
+          const resp = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {
+            headers: { 'Accept': 'application/json' }, signal
+          });
+          if (!resp.ok) return null;
+          const data = await resp.json();
+          return stripHtmlTags(data?.message?.abstract || '');
+        }
+      },
+      {
+        name: 'Semantic Scholar',
+        fn: async () => {
+          const resp = await fetch(
+            `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=abstract`,
+            { headers: { 'Accept': 'application/json' }, signal }
+          );
+          if (!resp.ok) return null;
+          const data = await resp.json();
+          return (data?.abstract || '').trim();
+        }
+      },
+      {
+        name: 'OpenAlex',
+        fn: async () => {
+          const resp = await fetch(
+            `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=abstract_inverted_index`,
+            { headers: { 'Accept': 'application/json' }, signal }
+          );
+          if (!resp.ok) return null;
+          const data = await resp.json();
+          // OpenAlex 返回 inverted index，需重建
+          const inv = data?.abstract_inverted_index;
+          if (!inv) return null;
+          const words = [];
+          for (const [word, positions] of Object.entries(inv)) {
+            for (const pos of positions) words[pos] = word;
+          }
+          return words.filter(Boolean).join(' ');
+        }
       }
-    } catch (e) {
-      if (e.name === 'AbortError') throw e;
-      return null;
+    ];
+
+    let best = '';
+    let bestName = '';
+
+    for (const src of sources) {
+      try {
+        const text = await src.fn();
+        if (text && text.length > best.length) {
+          best = text;
+          bestName = src.name;
+        }
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+      }
     }
+
+    if (best) {
+      console.log(`[摘要] DOI=${doi.slice(0,30)}... → ${bestName}:${best.length}字符`);
+    }
+    return best || null;
   }
 
   async function enrichWithFullAbstracts(records, options = {}) {
@@ -164,12 +222,11 @@ const IEEE_API = (() => {
     if (!records || records.length === 0) return { records, stats: { enriched: 0, total: 0 } };
 
     const total = records.length;
-    let enriched = 0, failed = 0, skipped = 0;
+    let enriched = 0, noBetter = 0, skipped = 0;
 
-    // ★ 启动时打印第一条记录，确认 DOI 存在
     if (total > 0) {
       const first = records[0];
-      console.log(`[CrossRef] 准备处理 ${total} 篇, 样例 DOI=${first.doi}, 搜索API摘要=${(first.abstract||'').length}字符`);
+      console.log(`[摘要] 开始处理 ${total} 篇 | 样例DOI=${first.doi} | 搜索API=${(first.abstract||'').length}字符 | 尾部="${(first.abstract||'').slice(-40)}"`);
     }
 
     for (let i = 0; i < total; i += batchSize) {
@@ -184,19 +241,18 @@ const IEEE_API = (() => {
         if (fullAbs && fullAbs.length > currentAbs.length) {
           record.abstract = fullAbs;
           enriched++;
-          if (enriched <= 3) console.log(`[CrossRef] ✓ ${record.doi}: ${currentAbs.length}→${fullAbs.length}字符`);
         } else {
-          if (failed < 5 && fullAbs) console.log(`[CrossRef] ✗ ${record.doi}: CrossRef返回${fullAbs?.length||0}≤搜索${currentAbs.length}`);
-          failed++;
+          if (fullAbs) noBetter++;
+          else noBetter++;
         }
       }));
 
-      if (onProgress) onProgress({ enriched, failed, total, current: Math.min(i + batchSize, total) });
+      if (onProgress) onProgress({ enriched, noChange: noBetter, total, current: Math.min(i + batchSize, total) });
       if (i + batchSize < total) await sleep(delayMs);
     }
 
-    console.log(`[CrossRef] 完成: ${enriched}增强 ${failed}不变 ${skipped}跳过`);
-    return { records, stats: { enriched, failed, total, skipped } };
+    console.log(`[摘要] 完成: ${enriched}篇增强 ${noBetter}篇不变 ${skipped}篇跳过 | 样例尾部="${(records[0].abstract||'').slice(-40)}"`);
+    return { records, stats: { enriched, noBetter, total, skipped } };
   }
 
   // ── 诊断 ─────────────────────────────────────────────────
