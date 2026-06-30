@@ -227,18 +227,21 @@
         format: 'RIS', citationsFormat
       });
 
-      // ===== 阶段 5：保存文件（唯一需要 background 的步骤）=====
-      const saveResult = await sendToBackgroundAsync({
-        action: 'saveRISFile', risText: finalRIS,
-        meta: { queryText, totalRecords: mergeResult.stats.totalUnique,
-          totalDownloaded: stats.totalDownloaded,
-          totalDuplicates: mergeResult.stats.totalDuplicates, saveAs }
-      });
-
-      if (signal.aborted) { isRunning = false; return; }
-
-      if (!saveResult?.success) {
-        setErrorAndStop(saveResult?.error || '文件保存失败');
+      // ===== 阶段 5：保存文件 =====
+      const filename = buildFilename(queryText);
+      try {
+        const blob = new Blob([finalRIS], { type: 'application/x-research-info-systems' });
+        const url = URL.createObjectURL(blob);
+        const downloadId = await chrome.downloads.download({
+          url: url, filename: filename,
+          saveAs: saveAs,
+          conflictAction: 'uniquify'
+        });
+        // 延迟释放 Blob URL
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        console.log('[Content] 文件已保存:', filename, 'downloadId:', downloadId);
+      } catch (err) {
+        setErrorAndStop('下载失败: ' + err.message);
         isRunning = false;
         return;
       }
@@ -247,8 +250,7 @@
       updateStorageState({
         status: 'complete',
         progress: { phase: 'complete', total: mergeResult.stats.totalUnique },
-        lastFilename: saveResult.filename,
-        lastDownloadId: saveResult.downloadId
+        lastFilename: filename
       });
 
       console.log(`[Content] 导出完成: ${mergeResult.stats.totalUnique} 篇`);
@@ -270,18 +272,32 @@
     if (abortController) { abortController.abort(); abortController = null; }
   }
 
-  function sendToBackground(msg) {
-    chrome.runtime.sendMessage(msg).catch(() => {});
+  /**
+   * 直接在页面中触发文件下载（不依赖 Service Worker）
+   */
+  function downloadFile(text, filename) {
+    const blob = new Blob([text], { type: 'application/x-research-info-systems' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    // 延迟清理
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
   }
 
-  function sendToBackgroundAsync(msg) {
-    return new Promise(resolve => {
-      chrome.runtime.sendMessage(msg, (resp) => {
-        resolve(chrome.runtime.lastError ? { success: false, error: chrome.runtime.lastError.message } : resp);
-      });
-    });
+  function buildFilename(queryText) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const snippet = (queryText || 'export')
+      .replace(/[^a-zA-Z0-9一-鿿\s-]/g, '').slice(0, 50).trim().replace(/\s+/g, '_');
+    return `IEEE_${snippet}_${timestamp}.ris`;
   }
 
   chrome.runtime.sendMessage({ action: 'contentScriptLoaded', url: window.location.href }).catch(() => {});
-  console.log('[IEEE RIS Exporter v3] Content script 已加载 (storage直写模式)');
+  console.log('[IEEE RIS Exporter v3] Content script 已加载 (storage直写 + 本地下载)');
 })();

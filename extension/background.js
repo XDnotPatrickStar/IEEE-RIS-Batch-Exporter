@@ -45,31 +45,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // ================================================================
-// 来自 content script 的消息（只有 saveRISFile 需要处理）
-// ================================================================
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  (async () => {
-    try {
-      switch (message.action) {
-        case 'saveRISFile':
-          try {
-            const result = await handleSaveRISFile(message.risText, message.meta);
-            sendResponse(result);
-          } catch (err) {
-            sendResponse({ success: false, error: err.message });
-          }
-          break;
-        default:
-          // 其他消息（contentScriptLoaded etc.）忽略
-          break;
-      }
-    } catch (err) {
-      console.error('[BG] 消息错误:', err);
-    }
-  })();
-  return true;
-});
+// 来自 content script 的消息（当前无实际处理，目录已移到 content）
 
 // ================================================================
 // 命令处理
@@ -124,64 +100,15 @@ async function handleCancelExport() {
 
 async function handleOpenFolder() {
   try {
-    const result = await chrome.storage.local.get(['taskState']);
-    const downloadId = result.taskState?.lastDownloadId;
-
-    if (downloadId != null) {
-      await chrome.downloads.show(downloadId);
-      return;
-    }
-
-    // 搜索最近的下载
     const downloads = await chrome.downloads.search({
-      limit: 1, orderBy: ['-startTime'], filenameRegex: 'IEEE_.*\\.ris$'
+      limit: 1, orderBy: ['-startTime'],
+      filenameRegex: 'IEEE_.*\\.ris$'
     });
     if (downloads.length > 0) {
       await chrome.downloads.show(downloads[0].id);
     }
   } catch (err) {
     console.warn('[BG] 打开文件夹失败:', err.message);
-  }
-}
-
-// ================================================================
-// RIS 文件保存
-// ================================================================
-
-async function handleSaveRISFile(risText, meta = {}) {
-  if (!risText || !risText.trim()) {
-    return { success: false, error: 'RIS 内容为空' };
-  }
-
-  const saveAs = meta.saveAs !== undefined ? meta.saveAs : true;
-
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const querySnippet = (meta.queryText || 'export')
-    .replace(/[^a-zA-Z0-9一-鿿\s-]/g, '').slice(0, 50).trim().replace(/\s+/g, '_');
-  const filename = `IEEE_${querySnippet}_${timestamp}.ris`;
-
-  const dataUrl = buildDataUrl(risText);
-
-  try {
-    const downloadId = await chrome.downloads.download({
-      url: dataUrl, filename, saveAs, conflictAction: 'uniquify'
-    });
-
-    console.log('[BG] RIS 已保存:', filename, 'downloadId:', downloadId);
-    return { success: true, downloadId, filename };
-  } catch (err) {
-    console.error('[BG] 文件保存失败:', err);
-    return { success: false, error: '下载失败: ' + err.message };
-  }
-}
-
-function buildDataUrl(text) {
-  try {
-    const bytes = new TextEncoder().encode(text);
-    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
-    return 'data:application/x-research-info-systems;charset=utf-8;base64,' + btoa(binary);
-  } catch (err) {
-    return 'data:application/x-research-info-systems;charset=utf-8,' + encodeURIComponent(text);
   }
 }
 
