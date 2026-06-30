@@ -151,6 +151,7 @@ const IEEE_API = (() => {
   async function fetchFullAbstract(doi, signal) {
     if (!doi) return null;
 
+    // ★ 三个源并行请求（host_permissions 已加，CORS已解决）
     const sources = [
       {
         name: 'CrossRef',
@@ -184,7 +185,6 @@ const IEEE_API = (() => {
           );
           if (!resp.ok) return null;
           const data = await resp.json();
-          // OpenAlex 返回 inverted index，需重建
           const inv = data?.abstract_inverted_index;
           if (!inv) return null;
           const words = [];
@@ -196,29 +196,26 @@ const IEEE_API = (() => {
       }
     ];
 
-    let best = '';
-    let bestName = '';
+    const results = await Promise.allSettled(sources.map(s => s.fn()));
+    let best = '', bestName = '';
 
-    for (const src of sources) {
-      try {
-        const text = await src.fn();
-        if (text && text.length > best.length) {
-          best = text;
-          bestName = src.name;
-        }
-      } catch (e) {
-        if (e.name === 'AbortError') throw e;
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === 'fulfilled' && r.value && r.value.length > best.length) {
+        best = r.value;
+        bestName = sources[i].name;
       }
     }
 
-    if (best) {
-      console.log(`[摘要] DOI=${doi.slice(0,30)}... → ${bestName}:${best.length}字符`);
+    if (best && bestName) {
+      console.log(`[摘要] ${doi.slice(0,20)}... → ${bestName}:${best.length}字符`);
     }
     return best || null;
   }
 
   async function enrichWithFullAbstracts(records, options = {}) {
-    const { delayMs = 300, batchSize = 4, onProgress, signal } = options;
+    // ★ 降低并发避免 429：2并发、500ms间隔
+    const { delayMs = 500, batchSize = 2, onProgress, signal } = options;
     if (!records || records.length === 0) return { records, stats: { enriched: 0, total: 0 } };
 
     const total = records.length;
@@ -226,13 +223,14 @@ const IEEE_API = (() => {
 
     if (total > 0) {
       const first = records[0];
-      console.log(`[摘要] 开始处理 ${total} 篇 | 样例DOI=${first.doi} | 搜索API=${(first.abstract||'').length}字符 | 尾部="${(first.abstract||'').slice(-40)}"`);
+      console.log(`[摘要] 开始 ${total}篇 | 样例DOI=${first.doi} | 搜索=${(first.abstract||'').length}字符 | 尾部="${(first.abstract||'').slice(-40)}"`);
     }
 
     for (let i = 0; i < total; i += batchSize) {
       if (signal?.aborted) throw new DOMException('用户取消', 'AbortError');
       const batch = records.slice(i, i + batchSize);
 
+      // ★ 并行处理每个 batch（2 DOI × 3 API = 6 并发，安全）
       await Promise.all(batch.map(async (record) => {
         if (!record.doi) { skipped++; return; }
         const currentAbs = record.abstract || record.abstractText || '';
@@ -242,8 +240,7 @@ const IEEE_API = (() => {
           record.abstract = fullAbs;
           enriched++;
         } else {
-          if (fullAbs) noBetter++;
-          else noBetter++;
+          noBetter++;
         }
       }));
 
@@ -251,7 +248,7 @@ const IEEE_API = (() => {
       if (i + batchSize < total) await sleep(delayMs);
     }
 
-    console.log(`[摘要] 完成: ${enriched}篇增强 ${noBetter}篇不变 ${skipped}篇跳过 | 样例尾部="${(records[0].abstract||'').slice(-40)}"`);
+    console.log(`[摘要] 完成: ${enriched}增强 ${noBetter}不变 ${skipped}跳过 | 尾部="${(records[0].abstract||'').slice(-40)}"`);
     return { records, stats: { enriched, noBetter, total, skipped } };
   }
 

@@ -16,7 +16,10 @@
     "activeTab"
   ],
   "host_permissions": [
-    "https://ieeexplore.ieee.org/*"
+    "https://ieeexplore.ieee.org/*",
+    "https://api.crossref.org/*",
+    "https://api.semanticscholar.org/*",
+    "https://api.openalex.org/*"
   ],
   "content_scripts": [
     {
