@@ -230,16 +230,20 @@
       // ===== 阶段 5：保存文件 =====
       const filename = buildFilename(queryText);
       try {
+        // content script 没有 chrome.downloads API，用 <a> 标签触发下载
         const blob = new Blob([finalRIS], { type: 'application/x-research-info-systems' });
         const url = URL.createObjectURL(blob);
-        const downloadId = await chrome.downloads.download({
-          url: url, filename: filename,
-          saveAs: saveAs,
-          conflictAction: 'uniquify'
-        });
-        // 延迟释放 Blob URL
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-        console.log('[Content] 文件已保存:', filename, 'downloadId:', downloadId);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 3000);
+
+        console.log('[Content] 文件已触发下载:', filename);
       } catch (err) {
         setErrorAndStop('下载失败: ' + err.message);
         isRunning = false;
