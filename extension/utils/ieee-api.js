@@ -148,18 +148,63 @@ const IEEE_API = (() => {
   /**
    * 尝试多个免费 API，取最长的摘要
    */
-  async function fetchFullAbstract(doi, signal) {
+  /**
+   * 带超时的 fetch
+   */
+  async function fetchWithTimeout(url, opts, timeoutMs = 8000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, { ...opts, signal: controller.signal });
+      return resp;
+    } catch (e) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 从 IEEE 文档页面提取内嵌的完整摘要
+   * IEEE 在页面中嵌入 xplGlobal.document.metadata = { abstract: "完整摘要..." }
+   */
+  async function fetchFromIEEEPage(articleNumber, signal) {
+    if (!articleNumber) return null;
+    try {
+      const resp = await fetchWithTimeout(
+        `https://ieeexplore.ieee.org/document/${articleNumber}/`,
+        { headers: { 'Accept': 'text/html' }, credentials: 'include' },
+        10000
+      );
+      if (!resp || !resp.ok) return null;
+      const html = await resp.text();
+      // 在 HTML 中搜索 xplGlobal.document.metadata
+      const match = html.match(/xplGlobal\.document\.metadata\s*=\s*(\{[\s\S]*?\})\s*;?\s*\}\s*;/);
+      if (!match) return null;
+      try {
+        const meta = JSON.parse(match[1]);
+        return meta.abstract || null;
+      } catch (e) { return null; }
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      return null;
+    }
+  }
+
+  async function fetchFullAbstract(doi, articleNumber, signal) {
     if (!doi) return null;
 
-    // ★ 三个源并行请求（host_permissions 已加，CORS已解决）
+    // 三个外部 API + IEEE 页面作为最终后备
+    // ★ 每个请求带 8 秒超时，防止卡住
     const sources = [
       {
         name: 'CrossRef',
         fn: async () => {
-          const resp = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {
-            headers: { 'Accept': 'application/json' }, signal
-          });
-          if (!resp.ok) return null;
+          const resp = await fetchWithTimeout(
+            `https://api.crossref.org/works/${encodeURIComponent(doi)}`,
+            { headers: { 'Accept': 'application/json' } }, 8000
+          );
+          if (!resp || !resp.ok) return null;
           const data = await resp.json();
           return stripHtmlTags(data?.message?.abstract || '');
         }
@@ -167,11 +212,11 @@ const IEEE_API = (() => {
       {
         name: 'Semantic Scholar',
         fn: async () => {
-          const resp = await fetch(
+          const resp = await fetchWithTimeout(
             `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=abstract`,
-            { headers: { 'Accept': 'application/json' }, signal }
+            { headers: { 'Accept': 'application/json' } }, 8000
           );
-          if (!resp.ok) return null;
+          if (!resp || !resp.ok) return null;
           const data = await resp.json();
           return (data?.abstract || '').trim();
         }
@@ -179,11 +224,11 @@ const IEEE_API = (() => {
       {
         name: 'OpenAlex',
         fn: async () => {
-          const resp = await fetch(
+          const resp = await fetchWithTimeout(
             `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=abstract_inverted_index`,
-            { headers: { 'Accept': 'application/json' }, signal }
+            { headers: { 'Accept': 'application/json' } }, 8000
           );
-          if (!resp.ok) return null;
+          if (!resp || !resp.ok) return null;
           const data = await resp.json();
           const inv = data?.abstract_inverted_index;
           if (!inv) return null;
@@ -193,6 +238,10 @@ const IEEE_API = (() => {
           }
           return words.filter(Boolean).join(' ');
         }
+      },
+      {
+        name: 'IEEE页面',
+        fn: async () => fetchFromIEEEPage(articleNumber, signal)
       }
     ];
 
@@ -234,7 +283,7 @@ const IEEE_API = (() => {
       await Promise.all(batch.map(async (record) => {
         if (!record.doi) { skipped++; return; }
         const currentAbs = record.abstract || record.abstractText || '';
-        const fullAbs = await fetchFullAbstract(record.doi, signal);
+        const fullAbs = await fetchFullAbstract(record.doi, record.articleNumber, signal);
 
         if (fullAbs && fullAbs.length > currentAbs.length) {
           record.abstract = fullAbs;
@@ -248,7 +297,14 @@ const IEEE_API = (() => {
       if (i + batchSize < total) await sleep(delayMs);
     }
 
-    console.log(`[摘要] 完成: ${enriched}增强 ${noBetter}不变 ${skipped}跳过 | 尾部="${(records[0].abstract||'').slice(-40)}"`);
+    // 统计还有多少篇摘要较短（可能仍被截断）
+    let stillShort = 0;
+    for (const r of records) {
+      const abs = r.abstract || '';
+      if (abs.length < 200) stillShort++;
+    }
+
+    console.log(`[摘要] 完成: ${enriched}增强 ${noBetter}不变 ${skipped}跳过 | 短摘要(<200字): ${stillShort}篇 | 尾部="${(records[0].abstract||'').slice(-40)}"`);
     return { records, stats: { enriched, noBetter, total, skipped } };
   }
 
